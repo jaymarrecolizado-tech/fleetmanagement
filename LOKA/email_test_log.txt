@@ -1,0 +1,5 @@
+[2026-01-21 16:57:24] QUEUED user_id=26 email=joyceanne.urdillas@dict.gov.ph template=request_confirmation email_queue_id=65 title="Request Submitted Successfully" type=request_confirmation
+[2026-01-21 16:57:24] QUEUED user_id=3 email=shawntibo94@gmail.com template=request_submitted email_queue_id=66 title="New Request Awaiting Your Approval" type=request_submitted
+[2026-01-21 16:57:24] QUEUED user_id=24 email=jay.recolizado@gmail.com template=added_to_request email_queue_id=67 title="Added to Vehicle Request" type=added_to_request
+[2026-01-21 16:57:24] QUEUED user_id=25 email=maricar.pecson@dict.gov.ph template=added_to_request email_queue_id=68 title="Added to Vehicle Request" type=added_to_request
+[2026-01-21 16:57:24] QUEUED user_id=20 email=jaymar.recolizado@dict.gov.ph template=driver_requested email_queue_id=69 title="You Have Been Requested as Driver" type=driver_requested

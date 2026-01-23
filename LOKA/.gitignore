@@ -1,0 +1,59 @@
+# Environment Variables
+.env
+.env.local
+.env.production
+.env.development
+.env.*
+
+# Keep example files
+!.env.example
+!.env.*.example
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# IDE Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/*.log
+*.log
+
+# Temporary Files
+*.tmp
+*.temp
+.cache/
+
+# Build Output
+dist/
+build/
+node_modules/
+
+# Windows Reserved Names
+NUL
+CON
+PRN
+AUX
+COM1
+COM2
+COM3
+COM4
+COM5
+COM6
+COM7
+COM8
+COM9
+LPT1
+LPT2
+LPT3
+LPT4
+LPT5
+LPT6
+LPT7
+LPT8
+LPT9

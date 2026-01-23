@@ -1,0 +1,31 @@
+<?php
+/**
+ * LOKA - System Constants (Production - Hostinger)
+ * 
+ * INSTRUCTIONS:
+ * 1. Copy this file to constants.php (or update existing constants.php)
+ * 2. Update APP_URL and SITE_URL with your actual domain
+ * 3. If installed in subdirectory, adjust APP_URL accordingly
+ */
+
+// Application
+define('APP_NAME', 'LOKA Fleet Management');
+define('APP_VERSION', '1.0.0');
+
+// URL Configuration
+// If installed in root: define('APP_URL', '');
+// If installed in subdirectory: define('APP_URL', '/subdirectory');
+define('APP_URL', '');  // Update this - usually empty for root, or '/subdirectory' if in subfolder
+
+// Full Site URL for emails (use your actual domain)
+define('SITE_URL', 'https://yourdomain.com');  // Replace with your actual domain (with https://)
+
+// Paths (usually don't need to change on Hostinger)
+define('BASE_PATH', dirname(__DIR__));
+define('CONFIG_PATH', BASE_PATH . '/config');
+define('CLASSES_PATH', BASE_PATH . '/classes');
+define('INCLUDES_PATH', BASE_PATH . '/includes');
+define('PAGES_PATH', BASE_PATH . '/pages');
+define('ASSETS_PATH', APP_URL . '/assets');
+
+// ... rest of constants remain the same ...

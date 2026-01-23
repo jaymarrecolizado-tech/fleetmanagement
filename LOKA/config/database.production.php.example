@@ -1,0 +1,24 @@
+<?php
+/**
+ * LOKA - Database Configuration (Production - Hostinger)
+ * 
+ * INSTRUCTIONS:
+ * 1. Copy this file to database.php (or rename it)
+ * 2. Update the values with your Hostinger database credentials
+ * 3. Get credentials from Hostinger hPanel > Databases > MySQL Databases
+ */
+
+// Database Settings - Hostinger Production
+define('DB_HOST', 'localhost');  // Usually 'localhost' on Hostinger
+define('DB_NAME', 'u123456789_fleet');  // Replace with your database name (usually starts with u123456789_)
+define('DB_USER', 'u123456789_admin');  // Replace with your database username
+define('DB_PASS', 'your_secure_password_here');  // Replace with your database password
+define('DB_CHARSET', 'utf8mb4');
+
+// PDO Options
+define('DB_OPTIONS', [
+    PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_OBJ,
+    PDO::ATTR_EMULATE_PREPARES   => false,
+    PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
+]);
