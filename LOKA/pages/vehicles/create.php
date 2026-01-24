@@ -38,24 +38,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     
     if (empty($errors)) {
-        $vehicleId = db()->insert('vehicles', [
-            'plate_number' => $plateNumber,
-            'make' => $make,
-            'model' => $model,
-            'year' => $year,
-            'vehicle_type_id' => $vehicleTypeId,
-            'color' => $color,
-            'fuel_type' => $fuelType,
-            'transmission' => $transmission,
-            'mileage' => $mileage,
-            'notes' => $notes,
-            'status' => VEHICLE_AVAILABLE,
-            'created_at' => date(DATETIME_FORMAT),
-            'updated_at' => date(DATETIME_FORMAT)
-        ]);
+        db()->beginTransaction();
         
-        auditLog('vehicle_created', 'vehicle', $vehicleId);
-        redirectWith('/?page=vehicles', 'success', 'Vehicle added successfully.');
+        try {
+            $vehicleId = db()->insert('vehicles', [
+                'plate_number' => $plateNumber,
+                'make' => $make,
+                'model' => $model,
+                'year' => $year,
+                'vehicle_type_id' => $vehicleTypeId,
+                'color' => $color,
+                'fuel_type' => $fuelType,
+                'transmission' => $transmission,
+                'mileage' => $mileage,
+                'notes' => $notes,
+                'status' => VEHICLE_AVAILABLE,
+                'created_at' => date(DATETIME_FORMAT),
+                'updated_at' => date(DATETIME_FORMAT)
+            ]);
+            
+            auditLog('vehicle_created', 'vehicle', $vehicleId);
+            
+            db()->commit();
+            redirectWith('/?page=vehicles', 'success', 'Vehicle added successfully.');
+        } catch (Exception $e) {
+            db()->rollback();
+            $errors[] = 'Failed to create vehicle.';
+        }
     }
 }
 

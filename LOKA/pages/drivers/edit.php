@@ -7,7 +7,7 @@ requireRole(ROLE_APPROVER);
 
 $driverId = (int) get('id');
 $driver = db()->fetch(
-    "SELECT d.*, u.name as driver_name, u.email FROM drivers d JOIN users u ON d.user_id = u.id WHERE d.id = ? AND d.deleted_at IS NULL",
+    "SELECT d.*, u.name as driver_name, u.email FROM drivers d JOIN users u ON d.user_id = u.id WHERE d.id = ? AND d.deleted_at IS NULL FOR UPDATE",
     [$driverId]
 );
 
@@ -33,27 +33,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($licenseExpiry))
         $errors[] = 'License expiry is required';
 
-    if ($licenseNumber && $licenseNumber !== $driver->license_number) {
-        $existing = db()->fetch("SELECT id FROM drivers WHERE license_number = ? AND id != ? AND deleted_at IS NULL", [$licenseNumber, $driverId]);
-        if ($existing)
-            $errors[] = 'License number already exists';
+    // Validate license expiry date
+    if (!empty($licenseExpiry)) {
+        $expiryDate = DateTime::createFromFormat('Y-m-d', $licenseExpiry);
+        $now = new DateTime();
+
+        if ($expiryDate < $now) {
+            $errors[] = 'License expiry date cannot be in the past';
+        }
     }
 
     if (empty($errors)) {
-        db()->update('drivers', [
-            'license_number' => $licenseNumber,
-            'license_expiry' => $licenseExpiry,
-            'license_class' => $licenseClass,
-            'years_experience' => $yearsExperience,
-            'status' => $status,
-            'emergency_contact_name' => $emergencyName,
-            'emergency_contact_phone' => $emergencyPhone,
-            'notes' => $notes,
-            'updated_at' => date(DATETIME_FORMAT)
-        ], 'id = ?', [$driverId]);
+        db()->beginTransaction();
 
-        auditLog('driver_updated', 'driver', $driverId);
-        redirectWith('/?page=drivers', 'success', 'Driver updated successfully.');
+        try {
+            // Re-fetch with lock to ensure atomicity
+            $driver = db()->fetch(
+                "SELECT d.*, u.name as driver_name, u.email FROM drivers d JOIN users u ON d.user_id = u.id WHERE d.id = ? AND d.deleted_at IS NULL FOR UPDATE",
+                [$driverId]
+            );
+
+            // Check unique license (exclude current)
+            if ($licenseNumber && $licenseNumber !== $driver->license_number) {
+                $existing = db()->fetch("SELECT id FROM drivers WHERE license_number = ? AND id != ? AND deleted_at IS NULL", [$licenseNumber, $driverId]);
+                if ($existing) {
+                    db()->rollback();
+                    $errors[] = 'License number already exists';
+                }
+            }
+
+            if (empty($errors)) {
+                db()->update('drivers', [
+                    'license_number' => $licenseNumber,
+                    'license_expiry' => $licenseExpiry,
+                    'license_class' => $licenseClass,
+                    'years_experience' => $yearsExperience,
+                    'status' => $status,
+                    'emergency_contact_name' => $emergencyName,
+                    'emergency_contact_phone' => $emergencyPhone,
+                    'notes' => $notes,
+                    'updated_at' => date(DATETIME_FORMAT)
+                ], 'id = ?', [$driverId]);
+
+                auditLog('driver_updated', 'driver', $driverId);
+                db()->commit();
+                redirectWith('/?page=drivers', 'success', 'Driver updated successfully.');
+            }
+        } catch (Exception $e) {
+            db()->rollback();
+            $errors[] = 'Failed to update driver';
+        }
     }
 }
 

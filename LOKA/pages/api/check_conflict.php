@@ -30,16 +30,27 @@ if ($type === 'driver') {
 }
 
 if ($conflict) {
+    $overlapMinutes = calculateOverlapMinutes($conflict, $start, $end);
+    $severity = $overlapMinutes <= 60 ? 'minor' : ($overlapMinutes <= 120 ? 'moderate' : 'severe');
+    
     jsonResponse([
         'conflict' => true,
+        'conflicts' => [$conflict],
+        'severity' => $severity,
         'message' => sprintf(
             'Conflict detected: Already booked by %s for trip to %s (%s to %s)',
             $conflict['requester_name'],
             $conflict['destination'],
             formatDateTime($conflict['start_datetime']),
             formatDateTime($conflict['end_datetime'])
-        )
+        ),
+        'request_id' => $conflict['id'],
+        'requester_name' => $conflict['requester_name'],
+        'destination' => $conflict['destination'],
+        'start_datetime' => formatDateTime($conflict['start_datetime']),
+        'end_datetime' => formatDateTime($conflict['end_datetime']),
+        'overlap_minutes' => $overlapMinutes
     ]);
 } else {
-    jsonResponse(['conflict' => false]);
+    jsonResponse(['conflict' => false, 'conflicts' => [], 'severity' => 'none']);
 }

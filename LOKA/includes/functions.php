@@ -12,6 +12,14 @@ function db(): Database
 }
 
 /**
+ * Check if currently in a database transaction
+ */
+function dbInTransaction(): bool
+{
+    return db()->inTransaction();
+}
+
+/**
  * Escape HTML output
  */
 function e(?string $string): string
@@ -390,9 +398,52 @@ function auditLog(string $action, string $entityType, ?int $entityId = null, ?ar
 
 /**
  * Create notification and send email
+ * 
+ * @param int $userId User ID to notify
+ * @param string $type Notification type
+ * @param string $title Notification title
+ * @param string $message Notification message
+ * @param string|null $link Optional link
+ * @param int|null $requestId Optional request ID for Control No. in email subject
  */
-function notify(int $userId, string $type, string $title, string $message, ?string $link = null): void
+function notify(int $userId, string $type, string $title, string $message, ?string $link = null, ?int $requestId = null): void
 {
+    // FIX: Validate notification type against known templates
+    $validTypes = array_keys(MAIL_TEMPLATES);
+    if (!in_array($type, $validTypes)) {
+        error_log("NOTIFY WARN: Unknown notification type '{$type}' for user #{$userId} - using 'default' template");
+        $type = 'default';
+    }
+    
+    // FIX: Rate limit - max 20 notifications of same type per user per hour
+    $rateLimitCheck = db()->fetchColumn(
+        "SELECT COUNT(*) FROM notifications 
+         WHERE user_id = ? AND type = ? 
+         AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+         AND deleted_at IS NULL",
+        [$userId, $type]
+    );
+    
+    if ($rateLimitCheck >= 20) {
+        error_log("NOTIFY RATE LIMIT: User #{$userId} exceeded 20 notifications/hour for type '{$type}' - skipping");
+        return;
+    }
+    
+    // FIX: Check for duplicate notification in last 5 minutes
+    $duplicate = db()->fetch(
+        "SELECT id FROM notifications 
+         WHERE user_id = ? AND type = ? AND title = ? AND message = ?
+         AND created_at >= DATE_SUB(NOW(), INTERVAL 5 MINUTE) 
+         AND deleted_at IS NULL 
+         LIMIT 1",
+        [$userId, $type, $title, $message]
+    );
+    
+    if ($duplicate) {
+        error_log("NOTIFY SKIP: Duplicate notification for user #{$userId} (type: {$type}) - skipping");
+        return;
+    }
+    
     // Save to database (in-app notification)
     $notifId = db()->insert('notifications', [
         'user_id' => $userId,
@@ -403,6 +454,13 @@ function notify(int $userId, string $type, string $title, string $message, ?stri
         'is_read' => 0,
         'created_at' => date(DATETIME_FORMAT)
     ]);
+
+    // FIX: Extract request ID from link if not provided
+    // Link format typically: /?page=requests&action=view&id=123
+    if ($requestId === null && $link) {
+        parse_str(parse_url($link, PHP_URL_QUERY), $query);
+        $requestId = isset($query['id']) ? (int) $query['id'] : null;
+    }
 
     // Queue email notification ONLY - never process during request to prevent lag
     try {
@@ -416,9 +474,9 @@ function notify(int $userId, string $type, string $title, string $message, ?stri
                 'message' => $message,
                 'link' => $link,
                 'link_text' => 'View Details'
-            ], $user->name);
+            ], $user->name, 5, $requestId);
             
-            error_log("NOTIFY: User #{$userId} ({$user->email}) - Notification #{$notifId} created, Email #{$emailId} queued (type: {$type})");
+            error_log("NOTIFY: User #{$userId} ({$user->email}) - Notification #{$notifId} created, Email #{$emailId} queued (type: {$type}" . ($requestId ? ", Control No.: {$requestId}" : "") . ")");
         } else {
             error_log("NOTIFY WARN: User #{$userId} has no email - Notification #{$notifId} created but email NOT queued");
         }
@@ -430,38 +488,63 @@ function notify(int $userId, string $type, string $title, string $message, ?stri
 /**
  * Notify all passengers of a request about status changes
  * Only notifies users (not guests) since guests don't have email addresses
+ * 
+ * ATOMIC OPERATION: Wrapped in transaction to ensure all notifications succeed or none
  */
 function notifyPassengers(int $requestId, string $type, string $title, string $message, ?string $link = null): void
 {
-    // Get all user passengers (exclude guests who don't have user_id)
-    $passengers = db()->fetchAll(
-        "SELECT rp.user_id, u.name, u.email 
-         FROM request_passengers rp
-         LEFT JOIN users u ON rp.user_id = u.id
-         WHERE rp.request_id = ? 
-         AND rp.user_id IS NOT NULL 
-         AND u.status = 'active' 
-         AND u.deleted_at IS NULL",
-        [$requestId]
-    );
-
-    if (empty($passengers)) {
-        error_log("NOTIFY PASSENGERS: Request #{$requestId} - No passenger users to notify");
-        return;
+    $alreadyInTransaction = dbInTransaction();
+    
+    if (!$alreadyInTransaction) {
+        db()->beginTransaction();
     }
+    
+    try {
+        $passengers = db()->fetchAll(
+            "SELECT rp.user_id, u.name, u.email 
+             FROM request_passengers rp
+             LEFT JOIN users u ON rp.user_id = u.id
+             WHERE rp.request_id = ? 
+             AND rp.user_id IS NOT NULL 
+             AND u.status = 'active' 
+             AND u.deleted_at IS NULL",
+            [$requestId]
+        );
 
-    $notified = 0;
-    foreach ($passengers as $passenger) {
-        if ($passenger->user_id && $passenger->email) {
-            try {
-                notify($passenger->user_id, $type, $title, $message, $link);
-                $notified++;
-            } catch (Exception $e) {
-                error_log("NOTIFY PASSENGERS ERROR: Failed to notify passenger {$passenger->user_id}: " . $e->getMessage());
+        if (empty($passengers)) {
+            error_log("NOTIFY PASSENGERS: Request #{$requestId} - No passenger users to notify");
+            if (!$alreadyInTransaction) {
+                db()->commit();
+            }
+            return;
+        }
+
+        $notified = 0;
+        $errors = [];
+        
+        foreach ($passengers as $passenger) {
+            if ($passenger->user_id && $passenger->email) {
+                try {
+                    notify($passenger->user_id, $type, $title, $message, $link);
+                    $notified++;
+                } catch (Exception $e) {
+                    $errors[] = "Passenger {$passenger->user_id}: " . $e->getMessage();
+                }
             }
         }
+        
+        error_log("NOTIFY PASSENGERS: Request #{$requestId} - Notified {$notified} passengers (type: {$type})" . ($errors ? " - Errors: " . implode("; ", $errors) : ""));
+        
+        if (!$alreadyInTransaction) {
+            db()->commit();
+        }
+    } catch (Exception $e) {
+        if (!$alreadyInTransaction) {
+            db()->rollback();
+        }
+        error_log("NOTIFY PASSENGERS ERROR: Request #{$requestId} - Transaction failed: " . $e->getMessage());
+        throw $e;
     }
-    error_log("NOTIFY PASSENGERS: Request #{$requestId} - Notified {$notified} passengers (type: {$type})");
 }
 
 /**
@@ -524,11 +607,13 @@ function notifyPassengersBatch(int $requestId, string $type, string $title, stri
         if ($passenger->email) {
             try {
                 $templateKey = isset(MAIL_TEMPLATES[$type]) ? $type : 'default';
+                
                 $queue->queueTemplate($passenger->email, $templateKey, [
                     'message' => $message,
                     'link' => $link,
                     'link_text' => 'View Details'
-                ], $passenger->name);
+                ], $passenger->name, 5, $requestId);
+                
                 $emailsQueued++;
             } catch (Exception $e) {
                 error_log("NOTIFY PASSENGERS BATCH ERROR: Failed to queue email for {$passenger->email}: " . $e->getMessage());
@@ -715,6 +800,61 @@ function checkVehicleConflict(int $vehicleId, string $start, string $end, ?int $
 
     $conflict = db()->fetch($sql, $params);
     return $conflict ? (array) $conflict : null;
+}
+
+/**
+ * Calculate overlap duration in minutes between conflict and request
+ * 
+ * @param array $conflict Conflict details from checkDriverConflict/checkVehicleConflict
+ * @param string $requestStart Request start datetime
+ * @param string $requestEnd Request end datetime
+ * @return int Overlap in minutes
+ */
+function calculateOverlapMinutes(array $conflict, string $requestStart, string $requestEnd): int
+{
+    $conflictStart = strtotime($conflict['start_datetime']);
+    $conflictEnd = strtotime($conflict['end_datetime']);
+    $reqStart = strtotime($requestStart);
+    $reqEnd = strtotime($requestEnd);
+    
+    // Calculate overlap
+    $overlapStart = max($conflictStart, $reqStart);
+    $overlapEnd = min($conflictEnd, $reqEnd);
+    $overlap = $overlapEnd - $overlapStart;
+    
+    return $overlap > 0 ? round($overlap / 60) : 0;
+}
+
+/**
+ * Get vehicle name from ID
+ * 
+ * @param int $vehicleId Vehicle ID
+ * @return string Vehicle plate - make model
+ */
+function getVehicleName(int $vehicleId): string
+{
+    $vehicle = db()->fetch(
+        "SELECT plate_number, make, model 
+         FROM vehicles WHERE id = ? AND deleted_at IS NULL",
+        [$vehicleId]
+    );
+    return $vehicle ? "{$vehicle->plate_number} - {$vehicle->make} {$vehicle->model}" : 'Unknown Vehicle';
+}
+
+/**
+ * Get driver name from ID
+ * 
+ * @param int $driverId Driver ID
+ * @return string Driver name
+ */
+function getDriverName(int $driverId): string
+{
+    $driver = db()->fetch(
+        "SELECT u.name FROM drivers d JOIN users u ON d.user_id = u.id 
+         WHERE d.id = ? AND d.deleted_at IS NULL",
+        [$driverId]
+    );
+    return $driver ? $driver->name : 'Unknown Driver';
 }
 
 /**

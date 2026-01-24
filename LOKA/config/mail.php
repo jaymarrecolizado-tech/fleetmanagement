@@ -140,5 +140,19 @@ define('MAIL_TEMPLATES', [
     'trip_revision' => [
         'subject' => 'Trip Sent Back for Revision',
         'template' => 'A trip you are part of has been sent back for revision by the approver.'
+    ],
+
+    // Conflict and override notifications
+    'motorpool_conflict_warning' => [
+        'subject' => '⚠️ Request Has Schedule Conflicts',
+        'template' => 'A vehicle request has potential scheduling conflicts with the requested vehicle and/or driver. Please review the conflicts and decide whether to approve with override or change the vehicle/driver assignment.'
+    ],
+    'request_override_notice' => [
+        'subject' => '⚠️ Your Trip May Be Affected by Override',
+        'template' => 'Your trip may be affected by a vehicle/driver override decision. Please review your trip details and contact motorpool if needed.'
+    ],
+    'passenger_override_notice' => [
+        'subject' => '⚠️ Trip May Be Affected by Override',
+        'template' => 'A trip you are part of may be affected by a vehicle/driver override decision. Please check your trip details and contact motorpool if needed.'
     ]
 ]);

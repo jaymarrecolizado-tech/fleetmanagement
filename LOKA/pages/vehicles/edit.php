@@ -8,7 +8,7 @@ requireRole(ROLE_APPROVER);
 $vehicleId = (int) get('id');
 $errors = [];
 
-$vehicle = db()->fetch("SELECT * FROM vehicles WHERE id = ? AND deleted_at IS NULL", [$vehicleId]);
+$vehicle = db()->fetch("SELECT * FROM vehicles WHERE id = ? AND deleted_at IS NULL FOR UPDATE", [$vehicleId]);
 if (!$vehicle) redirectWith('/?page=vehicles', 'danger', 'Vehicle not found.');
 
 $vehicleTypes = db()->fetchAll("SELECT * FROM vehicle_types WHERE deleted_at IS NULL ORDER BY name");
@@ -32,32 +32,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($make)) $errors[] = 'Make is required';
     if (empty($model)) $errors[] = 'Model is required';
     
-    // Check unique plate (exclude current)
-    if ($plateNumber && $plateNumber !== $vehicle->plate_number) {
-        $existing = db()->fetch("SELECT id FROM vehicles WHERE plate_number = ? AND id != ? AND deleted_at IS NULL", [$plateNumber, $vehicleId]);
-        if ($existing) $errors[] = 'Plate number already exists';
+    // Validate status transitions
+    $validTransitions = [
+        'available' => ['in_use', 'maintenance'],
+        'in_use' => ['available', 'completed'],
+        'maintenance' => ['available'],
+        'completed' => ['available']
+    ];
+    
+    if (isset($validTransitions[$vehicle->status]) && !in_array($status, $validTransitions[$vehicle->status])) {
+        $errors[] = "Cannot change vehicle status from {$vehicle->status} to {$status}";
     }
     
     if (empty($errors)) {
-        $oldData = (array) $vehicle;
+        db()->beginTransaction();
         
-        db()->update('vehicles', [
-            'plate_number' => $plateNumber,
-            'make' => $make,
-            'model' => $model,
-            'year' => $year,
-            'vehicle_type_id' => $vehicleTypeId,
-            'color' => $color,
-            'fuel_type' => $fuelType,
-            'transmission' => $transmission,
-            'mileage' => $mileage,
-            'status' => $status,
-            'notes' => $notes,
-            'updated_at' => date(DATETIME_FORMAT)
-        ], 'id = ?', [$vehicleId]);
-        
-        auditLog('vehicle_updated', 'vehicle', $vehicleId, $oldData);
-        redirectWith('/?page=vehicles', 'success', 'Vehicle updated successfully.');
+        try {
+            // Re-fetch with lock to ensure atomicity
+            $vehicle = db()->fetch("SELECT * FROM vehicles WHERE id = ? AND deleted_at IS NULL FOR UPDATE", [$vehicleId]);
+            
+            // Check unique plate (exclude current)
+            if ($plateNumber && $plateNumber !== $vehicle->plate_number) {
+                $existing = db()->fetch("SELECT id FROM vehicles WHERE plate_number = ? AND id != ? AND deleted_at IS NULL", [$plateNumber, $vehicleId]);
+                if ($existing) {
+                    db()->rollback();
+                    $errors[] = 'Plate number already exists';
+                }
+            }
+            
+            if (empty($errors)) {
+                $oldData = (array) $vehicle;
+                
+                db()->update('vehicles', [
+                    'plate_number' => $plateNumber,
+                    'make' => $make,
+                    'model' => $model,
+                    'year' => $year,
+                    'vehicle_type_id' => $vehicleTypeId,
+                    'color' => $color,
+                    'fuel_type' => $fuelType,
+                    'transmission' => $transmission,
+                    'mileage' => $mileage,
+                    'status' => $status,
+                    'notes' => $notes,
+                    'updated_at' => date(DATETIME_FORMAT)
+                ], 'id = ?', [$vehicleId]);
+                
+                auditLog('vehicle_updated', 'vehicle', $vehicleId, $oldData);
+                db()->commit();
+                redirectWith('/?page=vehicles', 'success', 'Vehicle updated successfully.');
+            }
+        } catch (Exception $e) {
+            db()->rollback();
+            $errors[] = 'Failed to update vehicle';
+        }
     }
 }
 

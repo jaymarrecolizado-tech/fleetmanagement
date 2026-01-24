@@ -310,10 +310,108 @@ try {
                  FROM drivers d JOIN users u ON d.user_id = u.id WHERE d.id = ?", 
                 [$driverId]
             );
-            
+
             $vehicleInfo = $vehicle ? "{$vehicle->plate_number} - {$vehicle->make} {$vehicle->model}" : 'TBA';
             $driverInfo = $driver ? $driver->driver_name : 'TBA';
-            
+
+            // Check for override and identify all conflicting requests
+            $overrideConflicts = post('override_conflict') ? true : false;
+            $conflictingRequests = [];
+
+            if ($overrideConflicts) {
+                // Get vehicle conflicts
+                $vehicleConflicts = db()->fetchAll(
+                    "SELECT r.*, u.name as requester_name
+                     FROM requests r
+                     JOIN users u ON r.user_id = u.id
+                     WHERE r.vehicle_id = ?
+                     AND r.id != ?
+                     AND r.status IN ('approved', 'pending_motorpool')
+                     AND r.start_datetime < ?
+                     AND r.end_datetime > ?
+                     AND r.deleted_at IS NULL",
+                    [$vehicleId, $requestId, $request->end_datetime, $request->start_datetime]
+                );
+
+                // Get driver conflicts
+                $driverConflicts = db()->fetchAll(
+                    "SELECT r.*, u.name as requester_name
+                     FROM requests r
+                     JOIN users u ON r.user_id = u.id
+                     WHERE r.driver_id = ?
+                     AND r.id != ?
+                     AND r.status IN ('approved', 'pending_motorpool')
+                     AND r.start_datetime < ?
+                     AND r.end_datetime > ?
+                     AND r.deleted_at IS NULL",
+                    [$driverId, $requestId, $request->end_datetime, $request->start_datetime]
+                );
+
+                // Merge conflicts (avoid duplicates)
+                $conflictMap = [];
+                foreach (array_merge($vehicleConflicts, $driverConflicts) as $conflict) {
+                    if (!isset($conflictMap[$conflict->id])) {
+                        $conflictMap[$conflict->id] = $conflict;
+                    }
+                }
+                $conflictingRequests = array_values($conflictMap);
+
+                // Notify all affected requesters (CUSTOMIZED MESSAGE)
+                foreach ($conflictingRequests as $conflictingRequest) {
+                    $overrideMessage = "⚠️ IMPORTANT: Your trip may be affected\n\n";
+                    $overrideMessage .= "Your trip to {$conflictingRequest->destination} on " . formatDateTime($conflictingRequest->start_datetime) . " (Request #{$conflictingRequest->id}) has been affected by a vehicle/driver override.\n\n";
+                    $overrideMessage .= "Overriding Request Details:\n";
+                    $overrideMessage .= "  Request #: {$requestId}\n";
+                    $overrideMessage .= "  Requester: {$request->requester_name}\n";
+                    $overrideMessage .= "  Destination: {$request->destination}\n";
+                    $overrideMessage .= "  Time: " . formatDateTime($request->start_datetime) . " - " . formatDateTime($request->end_datetime) . "\n";
+                    $overrideMessage .= "  Vehicle: {$vehicleInfo}\n";
+                    $overrideMessage .= "  Driver: {$driverInfo}\n\n";
+
+                    $overrideMessage .= "Your Request Details:\n";
+                    $overrideMessage .= "  Request #: {$conflictingRequest->id}\n";
+                    $overrideMessage .= "  Destination: {$conflictingRequest->destination}\n";
+                    $overrideMessage .= "  Time: " . formatDateTime($conflictingRequest->start_datetime) . " - " . formatDateTime($conflictingRequest->end_datetime) . "\n\n";
+
+                    $overrideMessage .= "Please review your trip details and contact motorpool if needed. You may need to adjust your plans.";
+
+                    $notificationsToSend[] = [
+                        'user_id' => $conflictingRequest->user_id,
+                        'type' => 'request_override_notice',
+                        'title' => '⚠️ Your Trip May Be Affected by Override',
+                        'message' => $overrideMessage,
+                        'link' => '/?page=requests&action=view&id=' . $conflictingRequest->id
+                    ];
+                }
+
+                // Notify all affected passengers (SIMPLIFIED MESSAGE)
+                foreach ($conflictingRequests as $conflictingRequest) {
+                    $passengers = db()->fetchAll(
+                        "SELECT user_id FROM request_passengers
+                         WHERE request_id = ? AND user_id IS NOT NULL",
+                        [$conflictingRequest->id]
+                    );
+
+                    foreach ($passengers as $passenger) {
+                        $passengerMessage = "⚠️ Trip Notice\n\n";
+                        $passengerMessage .= "A trip you are part of (Request #{$conflictingRequest->id}) may be affected by a vehicle/driver override.\n\n";
+                        $passengerMessage .= "Overriding Request: #{$requestId}\n";
+                        $passengerMessage .= "To: {$request->destination}\n";
+                        $passengerMessage .= "Time: " . formatDateTime($request->start_datetime) . "\n\n";
+
+                        $passengerMessage .= "Please check your trip details and contact motorpool if needed.";
+
+                        $notificationsToSend[] = [
+                            'user_id' => $passenger->user_id,
+                            'type' => 'passenger_override_notice',
+                            'title' => '⚠️ Trip May Be Affected by Override',
+                            'message' => $passengerMessage,
+                            'link' => '/?page=requests&action=view&id=' . $conflictingRequest->id
+                        ];
+                    }
+                }
+            }
+
             // Update vehicle and driver status
             db()->update('vehicles', ['status' => 'in_use'], 'id = ?', [$vehicleId]);
             db()->update('drivers', ['status' => 'on_trip'], 'id = ?', [$driverId]);

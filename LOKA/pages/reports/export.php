@@ -8,6 +8,10 @@ requireRole(ROLE_APPROVER);
 $startDate = get('start_date', date('Y-m-01'));
 $endDate = get('end_date', date('Y-m-t'));
 
+// Limit export to prevent memory exhaustion
+$maxRows = 10000;
+$limit = min((int) get('limit', $maxRows), $maxRows);
+
 $requests = db()->fetchAll(
     "SELECT r.id, r.created_at, r.start_datetime, r.end_datetime, r.purpose, r.destination,
             r.passenger_count, r.status, u.name as requester, d.name as department,
@@ -19,8 +23,9 @@ $requests = db()->fetchAll(
      LEFT JOIN drivers dr ON r.driver_id = dr.id AND dr.deleted_at IS NULL
      LEFT JOIN users dr_u ON dr.user_id = dr_u.id
      WHERE r.created_at BETWEEN ? AND ? AND r.deleted_at IS NULL
-     ORDER BY r.created_at DESC",
-    [$startDate, $endDate . ' 23:59:59']
+     ORDER BY r.created_at DESC
+     LIMIT ?",
+    [$startDate, $endDate . ' 23:59:59', $limit]
 );
 
 // Set headers for CSV download

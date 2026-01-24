@@ -19,7 +19,7 @@ if ($statusFilter) {
 $drivers = db()->fetchAll(
     "SELECT d.*, u.name as driver_name, u.email, u.phone
      FROM drivers d
-     JOIN users u ON d.user_id = u.id
+     JOIN users u ON d.user_id = u.id AND u.deleted_at IS NULL
      WHERE {$whereClause}
      ORDER BY u.name",
     $params
@@ -57,7 +57,8 @@ require_once INCLUDES_PATH . '/header.php';
                         <option value="">All Statuses</option>
                         <?php foreach (DRIVER_STATUS_LABELS as $key => $info): ?>
                             <option value="<?= $key ?>" <?= $statusFilter === $key ? 'selected' : '' ?>>
-                                <?= e($info['label']) ?></option>
+                                <?= e($info['label']) ?>
+                            </option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -108,14 +109,15 @@ require_once INCLUDES_PATH . '/header.php';
                                     <td><?= $driver->years_experience ?> years</td>
                                     <td><?= driverStatusBadge($driver->status) ?></td>
                                     <td><small><?= e($driver->phone ?: '-') ?></small></td>
-                                     <td>
+                                    <td>
                                         <div class="btn-group">
                                             <?php if (isApprover()): ?>
                                                 <a href="<?= APP_URL ?>/?page=drivers&action=edit&id=<?= $driver->id ?>"
                                                     class="btn btn-sm btn-outline-secondary" title="Edit">
                                                     <i class="bi bi-pencil"></i>
                                                 </a>
-                                                <form method="POST" action="<?= APP_URL ?>/?page=drivers&action=delete" style="display:inline;">
+                                                <form method="POST" action="<?= APP_URL ?>/?page=drivers&action=delete"
+                                                    style="display:inline;">
                                                     <?= csrfField() ?>
                                                     <input type="hidden" name="id" value="<?= $driver->id ?>">
                                                     <button type="submit" class="btn btn-sm btn-outline-danger" title="Delete"

@@ -25,6 +25,8 @@ class Mailer
         $this->encryption = MAIL_ENCRYPTION;
         $this->fromAddress = MAIL_FROM_ADDRESS;
         $this->fromName = MAIL_FROM_NAME;
+        // FIX: Initialize socket tracker for connection reuse
+        $this->socket = null;
     }
 
     /**
@@ -244,9 +246,18 @@ class Mailer
 
     /**
      * Connect to SMTP server
+     * 
+     * OPTIMIZATION: Reuse existing connection if still valid
+     * FIX: Prevents multiple TCP connections per batch
      */
     private function connect(): void
     {
+        // FIX: Reuse existing connection if still valid
+        if ($this->socket && is_resource($this->socket) && !feof($this->socket)) {
+            // Connection is already established and valid
+            return;
+        }
+        
         $host = $this->encryption === 'ssl' ? "ssl://{$this->host}" : $this->host;
         
         $context = stream_context_create([
@@ -261,7 +272,7 @@ class Mailer
             "{$host}:{$this->port}",
             $errno,
             $errstr,
-            30,
+            60,
             STREAM_CLIENT_CONNECT,
             $context
         );
@@ -271,7 +282,7 @@ class Mailer
         }
         
         // Set stream timeout
-        stream_set_timeout($this->socket, 30);
+        stream_set_timeout($this->socket, 60);
         
         // Get initial server response
         $response = $this->getResponse();
@@ -305,7 +316,7 @@ class Mailer
     private function getResponse(): string
     {
         $response = '';
-        $timeout = 30; // seconds
+        $timeout = 60; // seconds
         $startTime = time();
         
         while (true) {
@@ -360,5 +371,14 @@ class Mailer
     public function getErrors(): array
     {
         return $this->errors;
+    }
+    
+    /**
+     * Explicit cleanup when object is destroyed
+     * Ensures SMTP connection is properly closed
+     */
+    public function __destruct()
+    {
+        $this->disconnect();
     }
 }

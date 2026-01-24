@@ -15,35 +15,62 @@ $perPage = 10;
 $currentPage = max(1, (int) get('p', 1));
 $offset = ($currentPage - 1) * $perPage;
 
-// My Requests count
-$myRequestsCount = db()->count('requests', 'user_id = ? AND deleted_at IS NULL', [$userId]);
+// Dashboard statistics with error handling
+try {
+    $myRequestsCount = db()->count('requests', 'user_id = ? AND deleted_at IS NULL', [$userId]);
+} catch (Exception $e) {
+    error_log("Dashboard stats error (my requests): " . $e->getMessage());
+    $myRequestsCount = 0;
+}
 
 // Pending Approvals count (based on role)
 $pendingApprovalsCount = 0;
-if (isMotorpool()) {
-    $pendingApprovalsCount = db()->count('requests', "status = 'pending_motorpool' AND deleted_at IS NULL");
-} elseif (isApprover()) {
-    $pendingApprovalsCount = db()->count('requests', "status = 'pending' AND department_id = ? AND deleted_at IS NULL", [$departmentId]);
+try {
+    if (isMotorpool()) {
+        $pendingApprovalsCount = db()->count('requests', "status = 'pending_motorpool' AND deleted_at IS NULL");
+    } elseif (isApprover()) {
+        $pendingApprovalsCount = db()->count('requests', "status = 'pending' AND department_id = ? AND deleted_at IS NULL", [$departmentId]);
+    }
+} catch (Exception $e) {
+    error_log("Dashboard stats error (pending approvals): " . $e->getMessage());
+    $pendingApprovalsCount = 0;
 }
 
 // Available Vehicles count
-$availableVehiclesCount = db()->count('vehicles', "status = 'available' AND deleted_at IS NULL");
+try {
+    $availableVehiclesCount = db()->count('vehicles', "status = 'available' AND deleted_at IS NULL");
+} catch (Exception $e) {
+    error_log("Dashboard stats error (available vehicles): " . $e->getMessage());
+    $availableVehiclesCount = 0;
+}
 
 // Active Drivers count
-$activeDriversCount = db()->count('drivers', "status = 'available' AND deleted_at IS NULL");
+try {
+    $activeDriversCount = db()->count('drivers', "status = 'available' AND deleted_at IS NULL");
+} catch (Exception $e) {
+    error_log("Dashboard stats error (active drivers): " . $e->getMessage());
+    $activeDriversCount = 0;
+}
 
-// Upcoming Trips (approved requests starting in next 7 days)
-$upcomingTrips = db()->fetchAll(
-    "SELECT r.*, u.name as requester_name, v.plate_number, v.make, v.model
-     FROM requests r
-     LEFT JOIN users u ON r.user_id = u.id
-     LEFT JOIN vehicles v ON r.vehicle_id = v.id AND v.deleted_at IS NULL
-     WHERE r.status = 'approved' 
-     AND r.start_datetime BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 7 DAY)
-     AND r.deleted_at IS NULL
-     ORDER BY r.start_datetime ASC
-     LIMIT 5"
-);
+// Upcoming Trips (approved requests starting in next 7 days) - optimized with subquery
+try {
+    $upcomingTrips = db()->fetchAll(
+        "SELECT r.*, u.name as requester_name, v.plate_number, v.make, v.model
+         FROM (
+             SELECT * FROM requests
+             WHERE status = 'approved' 
+             AND start_datetime BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 7 DAY)
+             AND deleted_at IS NULL
+             ORDER BY start_datetime ASC
+             LIMIT 5
+         ) r
+         LEFT JOIN users u ON r.user_id = u.id
+         LEFT JOIN vehicles v ON r.vehicle_id = v.id AND v.deleted_at IS NULL"
+    );
+} catch (Exception $e) {
+    error_log("Dashboard error (upcoming trips): " . $e->getMessage());
+    $upcomingTrips = [];
+}
 
 // Recent Activity with pagination (my requests or all for admin)
 if (isAdmin()) {

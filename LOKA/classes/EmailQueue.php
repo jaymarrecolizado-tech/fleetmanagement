@@ -16,6 +16,16 @@ class EmailQueue
     
     /**
      * Add email to queue
+     * 
+     * @param string $toEmail Recipient email
+     * @param string $subject Email subject
+     * @param string $body Email body (HTML)
+     * @param string|null $toName Recipient name
+     * @param string|null $template Template key used
+     * @param int $priority Email priority (1-10)
+     * @param string|null $scheduledAt When to send the email
+     * @param int|null $requestId Related request ID for Control No. tracking
+     * @return int Inserted email queue ID
      */
     public function queue(
         string $toEmail,
@@ -24,7 +34,8 @@ class EmailQueue
         ?string $toName = null,
         ?string $template = null,
         int $priority = 5,
-        ?string $scheduledAt = null
+        ?string $scheduledAt = null,
+        ?int $requestId = null
     ): int {
         return $this->db->insert('email_queue', [
             'to_email' => $toEmail,
@@ -34,19 +45,29 @@ class EmailQueue
             'template' => $template,
             'priority' => $priority,
             'scheduled_at' => $scheduledAt,
+            'request_id' => $requestId,  // Store request ID for audit trail
             'created_at' => date('Y-m-d H:i:s')
         ]);
     }
     
     /**
      * Queue email using template
+     * 
+     * @param string $toEmail Recipient email
+     * @param string $templateKey Template key from MAIL_TEMPLATES
+     * @param array $data Template data (message, link, link_text)
+     * @param string|null $toName Recipient name
+     * @param int $priority Email priority (1-10, lower = higher priority)
+     * @param int|null $requestId Request ID for Control No. in subject
+     * @return int Inserted email queue ID
      */
     public function queueTemplate(
         string $toEmail,
         string $templateKey,
         array $data = [],
         ?string $toName = null,
-        int $priority = 5
+        int $priority = 5,
+        ?int $requestId = null
     ): int {
         // Get template
         $templates = MAIL_TEMPLATES;
@@ -57,10 +78,42 @@ class EmailQueue
         $template = $templates[$templateKey];
         $subject = $template['subject'];
         
+        // FIX: Add Control No. to subject if request ID is provided
+        if ($requestId !== null) {
+            $subject = "Control No. {$requestId}: {$subject}";
+        }
+        
         // Build email body
         $body = $this->buildEmailBody($templateKey, $template, $data);
         
-        return $this->queue($toEmail, $subject, $body, $toName, $templateKey, $priority);
+        // HYBRID SYNC/ASYNC: Send critical emails immediately
+        // Critical templates require instant delivery for better UX
+        $criticalTemplates = [
+            'request_confirmation',
+            'request_approved', 
+            'request_rejected',
+            'driver_assigned'
+        ];
+        
+        if (in_array($templateKey, $criticalTemplates) && MAIL_ENABLED) {
+            try {
+                $mailer = new Mailer();
+                $syncSent = $mailer->send($toEmail, $subject, $body, $toName);
+                
+                if ($syncSent) {
+                    error_log("[HYBRID-EMAIL] Sync email sent successfully: {$templateKey} to {$toEmail}");
+                } else {
+                    $errors = $mailer->getErrors();
+                    error_log("[HYBRID-EMAIL] Sync send failed (queued as backup): {$templateKey} to {$toEmail} - " . implode(', ', $errors));
+                }
+            } catch (Exception $e) {
+                error_log("[HYBRID-EMAIL] Sync send exception (queued as backup): {$templateKey} to {$toEmail} - " . $e->getMessage());
+            }
+        }
+        
+        // Always queue for backup and delivery confirmation
+        // Pass requestId to queue() for database tracking
+        return $this->queue($toEmail, $subject, $body, $toName, $templateKey, $priority, null, $requestId);
     }
     
     /**
@@ -121,28 +174,18 @@ class EmailQueue
     
     /**
      * Get pending emails for processing
-     * Prioritizes recently created emails (within last 30 seconds) for faster delivery
+     * 
+     * OPTIMIZATION: Removed 30-second bias to prevent email starvation
+     * OPTIMIZATION: Increased default batch size from 10 to 50
+     * FIX: All pending emails are processed fairly by priority, not just recent ones
+     * 
+     * @param int $limit Maximum emails to fetch (default 50)
+     * @return array Pending emails
      */
-    public function getPending(int $limit = 10): array
+    public function getPending(int $limit = 50): array
     {
-        // First, try to get emails created in the last 30 seconds (recent emails)
-        $recentEmails = $this->db->fetchAll(
-            "SELECT * FROM email_queue 
-             WHERE status = 'pending' 
-             AND attempts < max_attempts
-             AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-             AND created_at >= DATE_SUB(NOW(), INTERVAL 30 SECOND)
-             ORDER BY priority ASC, created_at ASC
-             LIMIT ?",
-            [$limit]
-        );
-        
-        // If we got some recent emails, return them
-        if (!empty($recentEmails)) {
-            return $recentEmails;
-        }
-        
-        // Otherwise, get any pending emails
+        // FIX: Process ALL pending emails by priority, not just recent ones
+        // This prevents email starvation where older emails never get sent
         return $this->db->fetchAll(
             "SELECT * FROM email_queue 
              WHERE status = 'pending' 
@@ -179,27 +222,45 @@ class EmailQueue
     
     /**
      * Mark email as failed
+     * 
+     * OPTIMIZATION: Added exponential backoff delay
+     * FIX: Prevents immediate retry spam
+     * 
+     * @param int $id Email ID
+     * @param string $error Error message
      */
     public function markFailed(int $id, string $error): void
     {
         $email = $this->db->fetch("SELECT attempts, max_attempts FROM email_queue WHERE id = ?", [$id]);
         
         $newAttempts = ($email->attempts ?? 0) + 1;
-        $status = $newAttempts >= ($email->max_attempts ?? 3) ? 'failed' : 'pending';
+        $maxAttempts = $email->max_attempts ?? 3;
+        $status = $newAttempts >= $maxAttempts ? 'failed' : 'pending';
+        
+        // FIX: Exponential backoff delay to prevent spam-like retry
+        // Delays: 5 min, 10 min, 20 min, 40 min, then failed
+        $delayMinutes = min(60, 5 * pow(2, $newAttempts - 1));
+        $retryAt = ($status === 'failed') ? null : date('Y-m-d H:i:s', strtotime("+{$delayMinutes} minutes"));
         
         $this->db->update('email_queue', [
             'status' => $status,
             'attempts' => $newAttempts,
             'error_message' => $error,
+            'scheduled_at' => $retryAt,
             'updated_at' => date('Y-m-d H:i:s')
         ], 'id = ?', [$id]);
+        
+        error_log("Email #{$id} marked as {$status}. Attempt {$newAttempts}/{$maxAttempts}. Retry in {$delayMinutes}min: {$error}");
     }
     
     /**
      * Process the email queue
      * Returns array with counts of sent, failed, skipped
+     * 
+     * OPTIMIZATION: Reuses SMTP connection across batch
+     * FIX: Duplicate Mailer instantiation removed
      */
-    public function process(int $batchSize = 10): array
+    public function process(int $batchSize = 50): array
     {
         $results = ['sent' => 0, 'failed' => 0, 'skipped' => 0];
         
@@ -210,14 +271,14 @@ class EmailQueue
                 return $results;
             }
             
+            // FIX: Create ONE mailer instance OUTSIDE loop - reuses SMTP connection
             $mailer = new Mailer();
             
             foreach ($emails as $email) {
                 $this->markProcessing($email->id);
                 
                 try {
-                    $mailer = new Mailer();
-                    
+                    // FIX: Removed duplicate instantiation - uses existing $mailer
                     $sent = $mailer->send(
                         $email->to_email,
                         $email->subject,
@@ -255,6 +316,10 @@ class EmailQueue
     
     /**
      * Get queue statistics
+     * 
+     * OPTIMIZATION: Added recent failure count for alerting
+     * 
+     * @return array Statistics including recent failures
      */
     public function getStats(): array
     {
@@ -263,6 +328,12 @@ class EmailQueue
             'processing' => $this->db->fetchColumn("SELECT COUNT(*) FROM email_queue WHERE status = 'processing'"),
             'sent' => $this->db->fetchColumn("SELECT COUNT(*) FROM email_queue WHERE status = 'sent'"),
             'failed' => $this->db->fetchColumn("SELECT COUNT(*) FROM email_queue WHERE status = 'failed'"),
+            // FIX: Track recent failures for alerting
+            'recent_failures' => $this->db->fetchColumn(
+                "SELECT COUNT(*) FROM email_queue 
+                 WHERE status = 'failed' 
+                 AND updated_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)"
+            )
         ];
     }
     

@@ -72,6 +72,42 @@ try {
     
     echo date('[Y-m-d H:i:s]') . " Processed: Sent={$results['sent']}, Failed={$results['failed']}\n";
     
+    // FIX: Alert admins if too many recent failures
+    $statsAfter = $queue->getStats();
+    if ($statsAfter['recent_failures'] > 10) {
+        echo date('[Y-m-d H:i:s]') . " WARNING: {$statsAfter['recent_failures']} recent failures detected!\n";
+        
+        // Get admin user IDs
+        $adminUsers = Database::getInstance()->fetchAll(
+            "SELECT id, email, name FROM users WHERE role = 'admin' AND status = 'active' AND deleted_at IS NULL"
+        );
+        
+        // Send alert to all admins
+        if (!empty($adminUsers)) {
+            $alertMessage = "CRITICAL: More than 10 emails have failed in the last hour.\n\n" .
+                            "Please check:\n" .
+                            "- Email configuration (config/mail.php)\n" .
+                            "- SMTP server status\n" .
+                            "- Error logs for details";
+            
+            foreach ($adminUsers as $admin) {
+                $queue->queueTemplate(
+                    $admin->email,
+                    'default',
+                    [
+                        'message' => $alertMessage,
+                        'link' => null,
+                        'link_text' => null
+                    ],
+                    $admin->name,
+                    1 // High priority
+                );
+            }
+            
+            echo date('[Y-m-d H:i:s]') . " Alert queued for " . count($adminUsers) . " admins\n";
+        }
+    }
+    
     // Cleanup old sent emails (run occasionally)
     if (rand(1, 10) === 1) {
         $cleaned = $queue->cleanup($cleanupDays);

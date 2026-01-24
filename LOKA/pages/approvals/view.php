@@ -96,6 +96,54 @@ if ($request->requested_driver_id) {
     );
 }
 
+// Get requested/preferred vehicle name if any (user selected during request creation)
+$requestedVehicle = null;
+if ($request->vehicle_id) {
+    $requestedVehicle = db()->fetch(
+        "SELECT v.*, vt.name as type_name, vt.passenger_capacity
+         FROM vehicles v
+         JOIN vehicle_types vt ON v.vehicle_type_id = vt.id
+         WHERE v.id = ?",
+        [$request->vehicle_id]
+    );
+}
+
+// Check conflicts for requested vehicle and driver (real-time for motorpool)
+$vehicleConflictsList = [];
+$driverConflictsList = [];
+$vehicleConflictSeverity = 'none';
+$driverConflictSeverity = 'none';
+$vehicleConflicts = 0;
+$driverConflicts = 0;
+
+if ($approvalType === 'motorpool') {
+    // Check vehicle conflicts
+    if ($request->vehicle_id) {
+        $vehicleConflict = checkVehicleConflict($request->vehicle_id, $request->start_datetime, $request->end_datetime, $requestId);
+        if ($vehicleConflict) {
+            $vehicleConflictsList[] = $vehicleConflict;
+            $vehicleConflicts = count($vehicleConflictsList);
+            $overlap = calculateOverlapMinutes($vehicleConflict, $request->start_datetime, $request->end_datetime);
+            $vehicleConflictSeverity = $overlap <= 60 ? 'minor' : ($overlap <= 120 ? 'moderate' : 'severe');
+        }
+    }
+
+    // Check driver conflicts
+    if ($request->requested_driver_id) {
+        $driverConflict = checkDriverConflict($request->requested_driver_id, $request->start_datetime, $request->end_datetime, $requestId);
+        if ($driverConflict) {
+            $driverConflictsList[] = $driverConflict;
+            $driverConflicts = count($driverConflictsList);
+            $overlap = calculateOverlapMinutes($driverConflict, $request->start_datetime, $request->end_datetime);
+            $driverConflictSeverity = $overlap <= 60 ? 'minor' : ($overlap <= 120 ? 'moderate' : 'severe');
+        }
+    }
+}
+
+$hasConflicts = ($vehicleConflictSeverity !== 'none' || $driverConflictSeverity !== 'none');
+$totalConflicts = $vehicleConflicts + $driverConflicts;
+$allConflictsList = array_merge($vehicleConflictsList, $driverConflictsList);
+
 // Get approval history
 $approvals = db()->fetchAll(
     "SELECT a.*, u.name as approver_name
@@ -419,6 +467,212 @@ require_once INCLUDES_PATH . '/header.php';
                             <?php if ($approvalType === 'motorpool'): ?>
                                 <!-- Vehicle/Driver Assignment (Only for Approval) -->
                                 <div id="assignmentSection">
+                                    <!-- Requested Preferences Section -->
+                                    <?php
+                                    $hasRequestedDriver = $requestedDriver && $request->requested_driver_id;
+                                    $hasRequestedVehicle = $requestedVehicle && $request->vehicle_id;
+                                    $recommendedVehicle = null;
+                                    
+                                    if ($request->passenger_count <= 4) {
+                                        $recommendedVehicle = 'Sedan or Hatchback (4-seater)';
+                                    } elseif ($request->passenger_count <= 7) {
+                                        $recommendedVehicle = 'SUV or Van (7-seater)';
+                                    } elseif ($request->passenger_count <= 15) {
+                                        $recommendedVehicle = 'Mini Bus (15-seater)';
+                                    } else {
+                                        $recommendedVehicle = 'Bus or Large Vehicle';
+                                    }
+                                    ?>
+                                    
+                                    <?php if ($hasRequestedDriver || $hasRequestedVehicle || $recommendedVehicle): ?>
+                                        <div class="alert alert-info mb-4">
+                                            <h6 class="alert-heading mb-2">
+                                                <i class="bi bi-info-circle me-1"></i>Requested Preferences
+                                            </h6>
+
+                                            <?php if ($hasRequestedVehicle): ?>
+                                                <div class="mb-2">
+                                                    <strong>Requested Vehicle:</strong>
+                                                    <span class="badge bg-primary ms-1">
+                                                        <i class="bi bi-car-front me-1"></i><?= e($requestedVehicle->plate_number) ?> - <?= e($requestedVehicle->make . ' ' . $requestedVehicle->model) ?>
+                                                    </span>
+                                                    <small class="text-muted">(will be auto-selected)</small>
+                                                </div>
+                                            <?php endif; ?>
+
+                                            <?php if ($hasRequestedDriver): ?>
+                                                <div class="mb-2">
+                                                    <strong>Requested Driver:</strong>
+                                                    <span class="badge bg-primary ms-1">
+                                                        <i class="bi bi-person-badge me-1"></i><?= e($requestedDriver->name) ?>
+                                                    </span>
+                                                    <small class="text-muted">(will be auto-selected)</small>
+                                                </div>
+                                            <?php endif; ?>
+
+                                            <?php if ($recommendedVehicle): ?>
+                                                <div>
+                                                    <strong>Recommended Vehicle:</strong>
+                                                    <span class="badge bg-success ms-1">
+                                                        <i class="bi bi-truck me-1"></i><?= $recommendedVehicle ?>
+                                                    </span>
+                                                    <small class="text-muted">(for <?= $request->passenger_count ?> passenger<?= $request->passenger_count > 1 ? 's' : '' ?>)</small>
+                                                </div>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php endif; ?>
+
+                                    <!-- Conflict Status Dashboard -->
+                                    <div id="conflictDashboard" class="card border-<?= $hasConflicts ? 'warning' : 'success' ?> mb-4">
+                                        <div class="card-header bg-<?= $hasConflicts ? 'warning' : 'success' ?> d-flex justify-content-between align-items-center">
+                                            <h6 class="mb-0">
+                                                <i class="bi bi-<?= $hasConflicts ? 'exclamation-triangle' : 'check-circle' ?> me-1"></i>
+                                                Conflict Status
+                                            </h6>
+                                            <?php if ($hasConflicts): ?>
+                                                <span class="badge bg-dark" id="conflictCountBadge">
+                                                    <?= $totalConflicts ?> conflict<?= $totalConflicts > 1 ? 's' : '' ?>
+                                                </span>
+                                            <?php endif; ?>
+                                        </div>
+
+                                        <div class="card-body">
+                                            <!-- Status Badges Row -->
+                                            <div class="row g-3 mb-3">
+                                                <!-- Vehicle Status -->
+                                                <div class="col-md-6">
+                                                    <div class="d-flex align-items-center p-3 rounded bg-light border">
+                                                        <div class="me-3">
+                                                            <span class="badge bg-<?= $vehicleConflictSeverity === 'none' ? 'success' : ($vehicleConflictSeverity === 'minor' ? 'warning' : 'danger') ?> rounded-circle p-2 fs-5" id="vehicleStatusBadge">
+                                                                <i class="bi bi-<?= $vehicleConflictSeverity === 'none' ? 'check-lg' : 'exclamation-lg' ?>"></i>
+                                                            </span>
+                                                        </div>
+                                                        <div>
+                                                            <div class="small text-muted">Vehicle Assignment</div>
+                                                            <div class="fw-bold">
+                                                                <?= $vehicleConflictSeverity === 'none' ? 'Available (no conflicts)' : ($vehicleConflictSeverity === 'minor' ? 'Minor Conflict' : 'Major Conflict') ?>
+                                                            </div>
+                                                            <?php if ($vehicleConflictSeverity !== 'none'): ?>
+                                                                <small class="text-danger"><?= $vehicleConflicts ?> overlapping trip<?= $vehicleConflicts > 1 ? 's' : '' ?></small>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <!-- Driver Status -->
+                                                <div class="col-md-6">
+                                                    <div class="d-flex align-items-center p-3 rounded bg-light border">
+                                                        <div class="me-3">
+                                                            <span class="badge bg-<?= $driverConflictSeverity === 'none' ? 'success' : ($driverConflictSeverity === 'minor' ? 'warning' : 'danger') ?> rounded-circle p-2 fs-5" id="driverStatusBadge">
+                                                                <i class="bi bi-<?= $driverConflictSeverity === 'none' ? 'check-lg' : 'exclamation-lg' ?>"></i>
+                                                            </span>
+                                                        </div>
+                                                        <div>
+                                                            <div class="small text-muted">Driver Assignment</div>
+                                                            <div class="fw-bold">
+                                                                <?= $driverConflictSeverity === 'none' ? 'Available (no conflicts)' : ($driverConflictSeverity === 'minor' ? 'Minor Conflict' : 'Major Conflict') ?>
+                                                            </div>
+                                                            <?php if ($driverConflictSeverity !== 'none'): ?>
+                                                                <small class="text-danger"><?= $driverConflicts ?> overlapping trip<?= $driverConflicts > 1 ? 's' : '' ?></small>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <!-- Conflict Details (Collapsible) -->
+                                            <?php if ($hasConflicts): ?>
+                                                <div class="accordion" id="conflictAccordion">
+                                                    <div class="accordion-item">
+                                                        <h2 class="accordion-header">
+                                                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#conflictDetails">
+                                                                <i class="bi bi-chevron-down me-2"></i>
+                                                                View Conflict Details
+                                                            </button>
+                                                        </h2>
+                                                        <div id="conflictDetails" class="accordion-collapse collapse">
+                                                            <div class="accordion-body">
+                                                                <!-- Vehicle Conflicts -->
+                                                                <?php if (!empty($vehicleConflictsList)): ?>
+                                                                    <h6 class="text-warning"><i class="bi bi-car-front me-1"></i>Vehicle Conflicts</h6>
+                                                                    <?php foreach ($vehicleConflictsList as $conflict): ?>
+                                                                        <div class="alert alert-warning mb-2">
+                                                                            <strong>Request #<?= $conflict['id'] ?></strong>
+                                                                            <div class="small">
+                                                                                <i class="bi bi-person me-1"></i><?= e($conflict['requester_name']) ?>
+                                                                                <i class="bi bi-geo-alt ms-2 me-1"></i><?= e($conflict['destination']) ?>
+                                                                            </div>
+                                                                            <div class="small">
+                                                                                <i class="bi bi-clock me-1"></i>
+                                                                                <?= formatDateTime($conflict['start_datetime']) ?> - <?= formatDateTime($conflict['end_datetime']) ?>
+                                                                            </div>
+                                                                            <div class="small text-danger">
+                                                                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                                                                Overlap: <?= calculateOverlapMinutes($conflict, $request->start_datetime, $request->end_datetime) ?> minutes
+                                                                            </div>
+                                                                            <a href="<?= APP_URL ?>/?page=approvals&action=view&id=<?= $conflict['id'] ?>"
+                                                                               class="btn btn-sm btn-outline-primary mt-2" target="_blank">
+                                                                                <i class="bi bi-arrow-up-right-square me-1"></i>View Request #<?= $conflict['id'] ?>
+                                                                            </a>
+                                                                        </div>
+                                                                    <?php endforeach; ?>
+                                                                <?php endif; ?>
+
+                                                                <!-- Driver Conflicts -->
+                                                                <?php if (!empty($driverConflictsList)): ?>
+                                                                    <h6 class="text-warning mt-3"><i class="bi bi-person-badge me-1"></i>Driver Conflicts</h6>
+                                                                    <?php foreach ($driverConflictsList as $conflict): ?>
+                                                                        <div class="alert alert-warning mb-2">
+                                                                            <strong>Request #<?= $conflict['id'] ?></strong>
+                                                                            <div class="small">
+                                                                                <i class="bi bi-person me-1"></i><?= e($conflict['requester_name']) ?>
+                                                                                <i class="bi bi-geo-alt ms-2 me-1"></i><?= e($conflict['destination']) ?>
+                                                                            </div>
+                                                                            <div class="small">
+                                                                                <i class="bi bi-clock me-1"></i>
+                                                                                <?= formatDateTime($conflict['start_datetime']) ?> - <?= formatDateTime($conflict['end_datetime']) ?>
+                                                                            </div>
+                                                                            <div class="small text-danger">
+                                                                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                                                                Overlap: <?= calculateOverlapMinutes($conflict, $request->start_datetime, $request->end_datetime) ?> minutes
+                                                                            </div>
+                                                                            <a href="<?= APP_URL ?>/?page=approvals&action=view&id=<?= $conflict['id'] ?>"
+                                                                               class="btn btn-sm btn-outline-primary mt-2" target="_blank">
+                                                                                <i class="bi bi-arrow-up-right-square me-1"></i>View Request #<?= $conflict['id'] ?>
+                                                                            </a>
+                                                                        </div>
+                                                                    <?php endforeach; ?>
+                                                                <?php endif; ?>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <!-- Override Confirmation -->
+                                                <div id="overrideConfirmation" class="alert alert-danger mt-3">
+                                                    <h6 class="alert-heading mb-2">
+                                                        <i class="bi bi-exclamation-octagon me-1"></i>Override Confirmation Required
+                                                    </h6>
+                                                    <div class="form-check mb-2">
+                                                        <input class="form-check-input" type="checkbox" id="confirmOverride" name="override_conflict" value="1">
+                                                        <label class="form-check-label fw-bold" for="confirmOverride">
+                                                            I want to proceed with these conflicts:
+                                                        </label>
+                                                    </div>
+                                                    <ul class="mb-0 ms-4">
+                                                        <?php foreach ($allConflictsList as $conflict): ?>
+                                                            <li>
+                                                                <strong>Request #<?= $conflict['id'] ?></strong>:
+                                                                <?= e($conflict['requester_name']) ?> to <?= e($conflict['destination']) ?>
+                                                                (<?= calculateOverlapMinutes($conflict, $request->start_datetime, $request->end_datetime) ?> min overlap)
+                                                            </li>
+                                                        <?php endforeach; ?>
+                                                    </ul>
+                                                </div>
+                                            <?php endif; ?>
+                                        </div>
+                                    </div>
+
                                     <!-- Vehicle Selection -->
                                     <div class="mb-3">
                                         <label for="vehicle_id" class="form-label">Assign Vehicle <span
@@ -426,10 +680,12 @@ require_once INCLUDES_PATH . '/header.php';
                                         <select class="form-select" id="vehicle_id" name="vehicle_id">
                                             <option value="">Select a vehicle...</option>
                                             <?php foreach ($availableVehicles as $vehicle): ?>
-                                                <option value="<?= $vehicle->id ?>">
+                                                <option value="<?= $vehicle->id ?>"
+                                                    <?= $hasRequestedVehicle && $vehicle->id == $request->vehicle_id ? 'selected' : '' ?>>
                                                     <?= e($vehicle->plate_number) ?> - <?= e($vehicle->make . ' ' . $vehicle->model) ?>
                                                     (<?= e($vehicle->type_name) ?>, <?= $vehicle->passenger_capacity ?> seats)
                                                     <?= $vehicle->status !== 'available' ? '[' . strtoupper($vehicle->status) . ']' : '' ?>
+                                                    <?= $hasRequestedVehicle && $vehicle->id == $request->vehicle_id ? ' <i class="bi bi-check-circle-fill text-success ms-1"></i> (Requested)' : '' ?>
                                                 </option>
                                             <?php endforeach; ?>
                                         </select>
@@ -449,10 +705,12 @@ require_once INCLUDES_PATH . '/header.php';
                                         <select class="form-select" id="driver_id" name="driver_id">
                                             <option value="">Select a driver...</option>
                                             <?php foreach ($availableDrivers as $driver): ?>
-                                                <option value="<?= $driver->id ?>">
+                                                <option value="<?= $driver->id ?>" 
+                                                    <?= $hasRequestedDriver && $driver->id == $request->requested_driver_id ? 'selected' : '' ?>>
                                                     <?= e($driver->driver_name) ?> - <?= e($driver->license_number) ?>
                                                     (<?= $driver->years_experience ?> yrs exp)
                                                     <?= $driver->status !== 'available' ? '[' . strtoupper($driver->status) . ']' : '' ?>
+                                                    <?= $hasRequestedDriver && $driver->id == $request->requested_driver_id ? ' <i class="bi bi-check-circle-fill text-success ms-1"></i> (Requested)' : '' ?>
                                                 </option>
                                             <?php endforeach; ?>
                                         </select>
@@ -599,21 +857,127 @@ require_once INCLUDES_PATH . '/header.php';
         function check(type, id, alertEl) {
             if (!id) {
                 alertEl.classList.add('d-none');
-                updateUI();
+                updateConflictDashboardItem(type, {conflict: false});
                 return;
             }
 
             fetch(`<?= APP_URL ?>/?page=api&action=check_conflict&type=${type}&id=${id}&start=${start}&end=${end}&exclude_id=${requestId}`)
                 .then(res => res.json())
                 .then(data => {
-                    if (data.conflict) {
-                        alertEl.querySelector('.message').textContent = data.message;
+                    if (data.conflict && data.conflicts.length > 0) {
+                        const conflict = data.conflicts[0];
+                        const overlapBadge = `<span class="badge bg-${getSeverityColor(data.severity)} ms-2">${data.severity.toUpperCase()} (${data.overlap_minutes}min)</span>`;
+
+                        alertEl.querySelector('.message').innerHTML = `
+                            <strong>Conflict with Request #${conflict.id}</strong>${overlapBadge}<br>
+                            <small>${conflict.requester_name} → ${conflict.destination}</small>
+                            <br>
+                            <small>${data.start_datetime} - ${data.end_datetime}</small>
+                            <br>
+                            <a href="<?= APP_URL ?>/?page=approvals&action=view&id=${conflict.id}"
+                               target="_blank"
+                               class="small text-primary">
+                               <i class="bi bi-arrow-up-right-square me-1"></i>View Request
+                            </a>
+                        `;
                         alertEl.classList.remove('d-none');
+
+                        // Update conflict dashboard
+                        updateConflictDashboardItem(type, data);
                     } else {
                         alertEl.classList.add('d-none');
+                        updateConflictDashboardItem(type, {conflict: false});
                     }
                     updateUI();
                 });
+        }
+
+        function getSeverityColor(severity) {
+            switch(severity) {
+                case 'minor': return 'warning';
+                case 'moderate': return 'warning';
+                case 'severe': return 'danger';
+                default: return 'secondary';
+            }
+        }
+
+        function updateConflictDashboardItem(type, data) {
+            const vehicleBadge = document.getElementById('vehicleStatusBadge');
+            const driverBadge = document.getElementById('driverStatusBadge');
+
+            if (type === 'vehicle' && vehicleBadge) {
+                if (data.conflict) {
+                    const badgeClass = getSeverityColor(data.severity);
+                    vehicleBadge.className = `badge bg-${badgeClass} rounded-circle p-2 fs-5`;
+                    vehicleBadge.innerHTML = '<i class="bi bi-exclamation-lg"></i>';
+                    const vehicleStatusText = vehicleBadge.parentElement.nextElementSibling.querySelector('.fw-bold');
+                    if (vehicleStatusText) {
+                        vehicleStatusText.textContent = data.severity === 'minor' ? 'Minor Conflict' : 'Major Conflict';
+                        vehicleStatusText.className = 'text-danger fw-bold';
+                    }
+                } else {
+                    vehicleBadge.className = 'badge bg-success rounded-circle p-2 fs-5';
+                    vehicleBadge.innerHTML = '<i class="bi bi-check-lg"></i>';
+                    const vehicleStatusText = vehicleBadge.parentElement.nextElementSibling.querySelector('.fw-bold');
+                    if (vehicleStatusText) {
+                        vehicleStatusText.textContent = 'Available (no conflicts)';
+                        vehicleStatusText.className = 'fw-bold';
+                    }
+                }
+            }
+
+            if (type === 'driver' && driverBadge) {
+                if (data.conflict) {
+                    const badgeClass = getSeverityColor(data.severity);
+                    driverBadge.className = `badge bg-${badgeClass} rounded-circle p-2 fs-5`;
+                    driverBadge.innerHTML = '<i class="bi bi-exclamation-lg"></i>';
+                    const driverStatusText = driverBadge.parentElement.nextElementSibling.querySelector('.fw-bold');
+                    if (driverStatusText) {
+                        driverStatusText.textContent = data.severity === 'minor' ? 'Minor Conflict' : 'Major Conflict';
+                        driverStatusText.className = 'text-danger fw-bold';
+                    }
+                } else {
+                    driverBadge.className = 'badge bg-success rounded-circle p-2 fs-5';
+                    driverBadge.innerHTML = '<i class="bi bi-check-lg"></i>';
+                    const driverStatusText = driverBadge.parentElement.nextElementSibling.querySelector('.fw-bold');
+                    if (driverStatusText) {
+                        driverStatusText.textContent = 'Available (no conflicts)';
+                        driverStatusText.className = 'fw-bold';
+                    }
+                }
+            }
+
+            // Update conflict count
+            const vConflict = vehicleBadge && !vehicleBadge.classList.contains('bg-success');
+            const dConflict = driverBadge && !driverBadge.classList.contains('bg-success');
+            const totalConflicts = (vConflict ? 1 : 0) + (dConflict ? 1 : 0);
+
+            const countBadge = document.getElementById('conflictCountBadge');
+            if (countBadge) {
+                if (totalConflicts > 0) {
+                    countBadge.textContent = `${totalConflicts} conflict${totalConflicts > 1 ? 's' : ''}`;
+                    countBadge.classList.remove('d-none');
+                } else {
+                    countBadge.classList.add('d-none');
+                }
+            }
+
+            // Toggle override confirmation
+            const overrideSection = document.getElementById('overrideConfirmation');
+            const conflictDashboard = document.getElementById('conflictDashboard');
+            if (overrideSection && conflictDashboard) {
+                if (totalConflicts > 0) {
+                    overrideSection.classList.remove('d-none');
+                    conflictDashboard.className = 'card border-warning mb-4';
+                    conflictDashboard.querySelector('.card-header').className = 'card-header bg-warning d-flex justify-content-between align-items-center';
+                    conflictDashboard.querySelector('.card-header h6').innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>Conflict Status';
+                } else {
+                    overrideSection.classList.add('d-none');
+                    conflictDashboard.className = 'card border-success mb-4';
+                    conflictDashboard.querySelector('.card-header').className = 'card-header bg-success d-flex justify-content-between align-items-center';
+                    conflictDashboard.querySelector('.card-header h6').innerHTML = '<i class="bi bi-check-circle me-1"></i>Conflict Status';
+                }
+            }
         }
 
         function updateUI() {

@@ -174,6 +174,14 @@ class Database
     }
 
     /**
+     * Check if currently in a transaction
+     */
+    public function inTransaction(): bool
+    {
+        return $this->pdo->inTransaction();
+    }
+
+    /**
      * Get row count
      */
     public function count(string $table, string $where = '1=1', array $params = []): int
